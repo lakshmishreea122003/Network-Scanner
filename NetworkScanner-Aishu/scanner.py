@@ -1,122 +1,101 @@
-import socket
-import subprocess
-import platform
-import threading
-from queue import Queue
+import nmap
 
-class NetworkScanner:
-    def __init__(self, ip_range, ports=None, timeout=1):
-        self.ip_range = ip_range
-        self.ports = ports if ports else [22, 80, 443, 3389]
-        self.timeout = timeout
-        self.results = {}
+class Network_Scanner:
+    def __init__(self,ip,subnet):
+        self.ip= ip
+        self.subnet = subnet
 
-    def ping(self, ip):
-        param = '-n' if platform.system().lower() == 'windows' else '-c'
-        timeout_flag = '-w' if platform.system().lower() == 'windows' else '-W'
-        command = ['ping', param, '1', timeout_flag, '1', ip]
+    # Feature 1: IP/Host Discovery
+    def discover_hosts(self):
+        print("################# \n IP/Host Discovery")
+        print(f"Scanning subnet: {self.subnet} for active hosts...\n")
+        scanner = nmap.PortScanner()
+        scanner.scan(hosts=self.subnet, arguments='-sn')  # -sn = ping scan (no port scan)
+        live_hosts = []
+        for host in scanner.all_hosts():
+            if scanner[host].state() == 'up':
+                hostname = scanner[host].hostname()
+                print(f"Host: {host} ({hostname}) is UP")
+                live_hosts.append((host, hostname))
+        if not live_hosts:
+            print("No active hosts found.")
+        return live_hosts
+    
+
+    # Feature 2: Port Scanning
+    def scan_open_ports(self):
+        print("################# \n Port Scanning")
+        print(f"\nScanning {self.ip} for open ports...\n")
+        scanner = nmap.PortScanner()
+        scanner.scan(self.ip, arguments='-sS -T4 -Pn')
+        for proto in scanner[self.ip].all_protocols():
+            print(f"Protocol: {proto}")
+            ports = scanner[self.ip][proto].keys()
+            for port in sorted(ports):
+                state = scanner[self.ip][proto][port]['state']
+                print(f"Port: {port} is {state}")
+
+    
+    # Feature 3: Banner Grabbing / Service Identification.
+    def grab_banners(self):
+        print("################# \n Banner Grabbing / Service Identification.")
+        print(f"\nPerforming service version detection on {self.ip}...\n")
+        scanner = nmap.PortScanner()
+        scanner.scan(self.ip, arguments='-sV -Pn')
+        for proto in scanner[self.ip].all_protocols():
+            print(f"\nProtocol: {proto}")
+            lport = scanner[self.ip][proto].keys()
+            for port in sorted(lport):
+                state = scanner[self.ip][proto][port]['state']
+                name = scanner[self.ip][proto][port].get('name', 'unknown')
+                product = scanner[self.ip][proto][port].get('product', '')
+                version = scanner[self.ip][proto][port].get('version', '')
+                extrainfo = scanner[self.ip][proto][port].get('extrainfo', '')
+                banner = f"{product} {version} {extrainfo}".strip()
+                print(f"Port {port} is {state} - Service: {name} | Banner: {banner}")
+
+
+    # Feature 4: OS Fingerprinting.
+    def detect_os(self):
+        print(f"\nPerforming OS detection on {self.ip}...\n")
+        scanner = nmap.PortScanner()
         try:
-            output = subprocess.check_output(command, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-            return True
-        except subprocess.CalledProcessError:
-            return False
-
-    def scan_port(self, ip, port):
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.settimeout(self.timeout)
-                result = sock.connect_ex((ip, port))
-                return result == 0
-        except Exception:
-            return False
-
-    def grab_banner(self, ip, port):
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.settimeout(self.timeout)
-                sock.connect((ip, port))
-                sock.sendall(b'HEAD / HTTP/1.0\r\n\r\n')
-                banner = sock.recv(1024).decode(errors='ignore')
-                return banner.strip()
-        except Exception:
-            return ""
-
-    def detect_os(self, ip):
-        param = '-n' if platform.system().lower() == 'windows' else '-c'
-        try:
-            output = subprocess.check_output(['ping', param, '1', ip], stderr=subprocess.DEVNULL).decode('utf-8', errors='ignore')
-            ttl = None
-            for line in output.splitlines():
-                if 'ttl=' in line.lower():
-                    ttl_str = line.lower().split('ttl=')[1].split()[0]
-                    ttl = int(ttl_str)
-                    break
-            if ttl is not None:
-                if ttl >= 128:
-                    return 'Windows'
-                elif ttl >= 64:
-                    return 'Linux/Unix'
-                elif ttl >= 255:
-                    return 'Network Device/Cisco'
-                else:
-                    return 'Unknown'
-        except Exception:
-            pass
-        return 'Unknown'
-
-    def scan_ip(self, ip):
-        host_info = {'alive': False, 'open_ports': {}, 'os': 'Unknown'}
-        if self.ping(ip):
-            host_info['alive'] = True
-            host_info['os'] = self.detect_os(ip)
-            for port in self.ports:
-                if self.scan_port(ip, port):
-                    banner = self.grab_banner(ip, port)
-                    host_info['open_ports'][port] = banner or 'Unknown service'
-        self.results[ip] = host_info
-
-    def run_scan(self, threads=50):
-        q = Queue()
-        for ip in self.ip_range:
-            q.put(ip)
-
-        def worker():
-            while not q.empty():
-                ip = q.get()
-                try:
-                    self.scan_ip(ip)
-                finally:
-                    q.task_done()
-
-        for _ in range(min(threads, len(self.ip_range))):
-            t = threading.Thread(target=worker)
-            t.daemon = True
-            t.start()
-
-        q.join()
-
-    def print_results(self):
-        for ip, info in self.results.items():
-            print(f"IP: {ip}")
-            if not info['alive']:
-                print("  Host is down or not responding.")
+            scanner.scan(self.ip, arguments='-O -Pn')
+            if 'osmatch' in scanner[self.ip]:
+                for os in scanner[self.ip]['osmatch']:
+                   print(f"Detected OS: {os['name']} (Accuracy: {os['accuracy']}%)")
             else:
-                print(f"  Host is alive. OS guess: {info['os']}")
-                if info['open_ports']:
-                    print("  Open Ports:")
-                    for port, banner in info['open_ports'].items():
-                        print(f"    Port {port}: {banner}")
+                print("OS detection failed or insufficient data.")
+        except Exception as e:
+            print(f"Error: {e}")
+
+
+    # Detected vulnerabilities 
+    def detect_vulnerabilities(self):
+        print("################# \n Detected vulnerabilities ")
+        print(f"\nScanning {self.ip} for vulnerabilities...\n")
+        nm = nmap.PortScanner()
+        try:
+            nm.scan(self.ip, arguments='-sV --script=vuln')  # Scan services and run vulnerability scripts
+            for host in nm.all_hosts():
+                print(f"Host: {host}")
+                if 'hostscript' in nm[host]:
+                    for script in nm[host]['hostscript']:
+                        print(f"  - Vulnerability: {script['id']} => {script['output']}")
                 else:
-                    print("  No open ports found.")
-            print("-" * 40)
+                    print("No vulnerabilities detected.")
+        except Exception as e:
+            print(f"Error: {e}")
 
 
-if __name__ == '__main__':
-    base_ip = '192.168.1.'
-    ip_list = [base_ip + str(i) for i in range(1, 11)]
+def main():
+    ip = input("Enter IP:")
+    subnet = input("Enter subnet:")
+    scanner = Network_Scanner(ip,subnet)
+    scanner.discover_hosts()
+    scanner.scan_open_ports()
+    scanner.grab_banners()
+    scanner.detect_vulnerabilities()
 
-    scanner = NetworkScanner(ip_list)
-    print("Starting scan...\n")
-    scanner.run_scan()
-    print("\nScan complete. Results:\n")
-    scanner.print_results()
+if __name__ == "__main__":
+    main()
